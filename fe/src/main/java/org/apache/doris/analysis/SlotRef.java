@@ -109,6 +109,10 @@ public class SlotRef extends Expr {
         this.tblName = name;
     }
 
+    public void setDesc(SlotDescriptor desc) {
+        this.desc = desc;
+    }
+
     @Override
     public void vectorizedAnalyze(Analyzer analyzer) {
         computeOutputColumn(analyzer);

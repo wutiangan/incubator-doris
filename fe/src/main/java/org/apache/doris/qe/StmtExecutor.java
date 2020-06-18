@@ -17,6 +17,8 @@
 
 package org.apache.doris.qe;
 
+import com.google.common.base.Preconditions;
+import org.apache.calcite.rel.RelNode;
 import org.apache.doris.analysis.Analyzer;
 import org.apache.doris.analysis.CreateTableAsSelectStmt;
 import org.apache.doris.analysis.DdlStmt;
@@ -62,6 +64,9 @@ import org.apache.doris.mysql.MysqlChannel;
 import org.apache.doris.mysql.MysqlEofPacket;
 import org.apache.doris.mysql.MysqlSerializer;
 import org.apache.doris.mysql.privilege.PrivPredicate;
+import org.apache.doris.optimizer.CalcitePlanner;
+import org.apache.doris.optimizer.PlanNodeConverter;
+import org.apache.doris.planner.PlanNode;
 import org.apache.doris.planner.Planner;
 import org.apache.doris.proto.PQueryStatistics;
 import org.apache.doris.qe.QueryState.MysqlStateType;
@@ -404,8 +409,25 @@ public class StmtExecutor {
         if (isForwardToMaster()) {
             return;
         }
-        
+
         analyzer = new Analyzer(context.getCatalog(), context);
+
+        if (context.getSessionVariable().enableCaclite() && parsedStmt instanceof SelectStmt) {
+            planner = new Planner();
+            String sql = originStmt.originStmt.toLowerCase();
+            if (parsedStmt.isExplain()) {
+                if (sql.startsWith("explain")) {
+                    sql = sql.substring(7);
+                } else if (sql.startsWith("describe")) {
+                    sql = sql.substring(8);
+                } else {
+                    throw new AnalysisException("the explain stmt not implement");
+                }
+            }
+            planner.calcitePlan(sql, parsedStmt, analyzer, tQueryOptions);
+            return;
+        }
+
         // Convert show statement to select statement here
         if (parsedStmt instanceof ShowStmt) {
             SelectStmt selectStmt = ((ShowStmt) parsedStmt).toSelectStmt(analyzer);

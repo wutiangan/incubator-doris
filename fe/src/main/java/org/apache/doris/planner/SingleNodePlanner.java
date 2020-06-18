@@ -17,36 +17,8 @@
 
 package org.apache.doris.planner;
 
-import org.apache.doris.analysis.AggregateInfo;
-import org.apache.doris.analysis.AnalyticInfo;
-import org.apache.doris.analysis.Analyzer;
-import org.apache.doris.analysis.AssertNumRowsElement;
-import org.apache.doris.analysis.BaseTableRef;
-import org.apache.doris.analysis.BinaryPredicate;
-import org.apache.doris.analysis.CaseExpr;
-import org.apache.doris.analysis.CastExpr;
-import org.apache.doris.analysis.DescriptorTable;
-import org.apache.doris.analysis.Expr;
-import org.apache.doris.analysis.ExprSubstitutionMap;
-import org.apache.doris.analysis.FunctionCallExpr;
-import org.apache.doris.analysis.GroupByClause;
-import org.apache.doris.analysis.GroupingInfo;
-import org.apache.doris.analysis.InPredicate;
-import org.apache.doris.analysis.InlineViewRef;
-import org.apache.doris.analysis.IsNullPredicate;
-import org.apache.doris.analysis.JoinOperator;
-import org.apache.doris.analysis.LiteralExpr;
-import org.apache.doris.analysis.NullLiteral;
-import org.apache.doris.analysis.QueryStmt;
-import org.apache.doris.analysis.SelectStmt;
-import org.apache.doris.analysis.SetOperationStmt;
-import org.apache.doris.analysis.SlotDescriptor;
-import org.apache.doris.analysis.SlotId;
-import org.apache.doris.analysis.SlotRef;
-import org.apache.doris.analysis.TableRef;
-import org.apache.doris.analysis.TupleDescriptor;
-import org.apache.doris.analysis.TupleId;
-import org.apache.doris.analysis.TupleIsNullPredicate;
+import org.apache.calcite.rel.RelNode;
+import org.apache.doris.analysis.*;
 import org.apache.doris.catalog.AggregateFunction;
 import org.apache.doris.catalog.AggregateType;
 import org.apache.doris.catalog.Column;
@@ -64,6 +36,8 @@ import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 
+import org.apache.doris.optimizer.CalcitePlanner;
+import org.apache.doris.optimizer.PlanNodeConverter;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -152,6 +126,26 @@ public class SingleNodePlanner {
                 ctx_.getQueryOptions().getDefault_order_by_limit());
         Preconditions.checkNotNull(singleNodePlan);
         return singleNodePlan;
+    }
+
+
+    public PlanNode  calciteCreateSingleNodePlan(String originStmt, QueryStmt queryStmt, Analyzer analyzer) throws UserException, AnalysisException {
+        if (LOG.isTraceEnabled()) {
+            LOG.trace("desctbl: " + analyzer.getDescTbl().debugString());
+        }
+        CalcitePlanner calciteplanner  = new CalcitePlanner();
+        RelNode root = calciteplanner.plan(originStmt);
+        PlanNodeConverter convert = new PlanNodeConverter(root, analyzer, this);
+
+        List<Expr> resultExprs = Lists.newArrayList();
+        List<String> colLables = Lists.newArrayList();
+        PlanNode node = convert.convert(resultExprs, colLables);
+        scanNodes.add((ScanNode)node);
+        queryStmt.setBaseResultExpr(resultExprs);
+        queryStmt.setResultExpr(resultExprs); // for mysql sendFields
+        queryStmt.setColLabels(colLables);
+
+        return node;
     }
 
     /**
@@ -876,7 +870,7 @@ public class SingleNodePlanner {
     }
 
     // no need to remove?
-    private PartitionColumnFilter createPartitionFilter(SlotDescriptor desc, List<Expr> conjuncts) {
+    public PartitionColumnFilter createPartitionFilter(SlotDescriptor desc, List<Expr> conjuncts) {
         PartitionColumnFilter partitionColumnFilter = null;
         for (Expr expr : conjuncts) {
             if (!expr.isBound(desc.getId())) {

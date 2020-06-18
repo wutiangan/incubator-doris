@@ -68,7 +68,7 @@ import java.util.zip.Adler32;
  * if the table has never been loaded * if the table loading failed on the
  * previous attempt
  */
-public class Database extends MetaObject implements Writable {
+public class  Database extends MetaObject implements Writable {
     private static final Logger LOG = LogManager.getLogger(Database.class);
 
     // empirical value.

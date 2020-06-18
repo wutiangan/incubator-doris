@@ -100,12 +100,17 @@ public class SessionVariable implements Serializable, Writable {
     public static final String MAX_SCAN_KEY_NUM = "max_scan_key_num";
     public static final String MAX_PUSHDOWN_CONDITIONS_PER_COLUMN = "max_pushdown_conditions_per_column";
 
+    public static final String ENABLE_CALCITE = "enable_calcite";
+
     // max memory used on every backend.
     @VariableMgr.VarAttr(name = EXEC_MEM_LIMIT)
     public long maxExecMemByte = 2147483648L;
 
     @VariableMgr.VarAttr(name = "enable_spilling")
     public boolean enableSpilling = false;
+
+    @VariableMgr.VarAttr(name = ENABLE_CALCITE)
+    private boolean enableCalcite = false;
 
     // query timeout in second.
     @VariableMgr.VarAttr(name = QUERY_TIMEOUT)
@@ -268,6 +273,9 @@ public class SessionVariable implements Serializable, Writable {
         return isReportSucc;
     }
 
+    public boolean enableCaclite() {
+        return enableCalcite;
+    }
     public int getWaitTimeoutS() {
         return waitTimeout;
     }
