@@ -18,7 +18,9 @@
 package org.apache.doris.optimizer;
 
 import com.google.common.base.Preconditions;
+//import com.sun.deploy.security.ruleset.ExceptionRule;
 import org.apache.calcite.adapter.enumerable.EnumerableConvention;
+//import org.apache.calcite.adapter.enumerable.EnumerableIntersectRule;
 import org.apache.calcite.adapter.enumerable.EnumerableRules;
 import org.apache.calcite.config.CalciteConnectionConfigImpl;
 import org.apache.calcite.jdbc.CalciteSchema;
@@ -80,11 +82,14 @@ public class CalcitePlanner {
         planner.addRule(ReduceExpressionsRule.PROJECT_INSTANCE);
         planner.addRule(PruneEmptyRules.PROJECT_INSTANCE);
         // add ConverterRule
-//        planner.addRule(EnumerableRules.ENUMERABLE_MERGE_JOIN_RULE);
-//        planner.addRule(EnumerableRules.ENUMERABLE_SORT_RULE);
-//        planner.addRule(EnumerableRules.ENUMERABLE_VALUES_RULE);
+        planner.addRule(EnumerableRules.ENUMERABLE_JOIN_RULE);
+        planner.addRule(EnumerableRules.ENUMERABLE_AGGREGATE_RULE);
+        planner.addRule(EnumerableRules.ENUMERABLE_SORT_RULE);
+        planner.addRule(EnumerableRules.ENUMERABLE_VALUES_RULE);
         planner.addRule(EnumerableRules.ENUMERABLE_PROJECT_RULE);
-//        planner.addRule(EnumerableRules.ENUMERABLE_FILTER_RULE);
+        planner.addRule(EnumerableRules.ENUMERABLE_FILTER_RULE);
+        planner.addRule(EnumerableRules.ENUMERABLE_INTERSECT_RULE);
+        planner.addRule(EnumerableRules.ENUMERABLE_UNION_RULE);
 
         try {
             SqlTypeFactoryImpl factory = new SqlTypeFactoryImpl(RelDataTypeSystem.DEFAULT);

@@ -52,9 +52,9 @@ public class CalciteUtils {
             public RelDataType getRowType(final RelDataTypeFactory typeFactory) {
                 RelDataTypeFactory.Builder builder = typeFactory.builder();
 
-                builder.add("id", new BasicSqlType(new RelDataTypeSystemImpl() {}, SqlTypeName.INTEGER));
-                builder.add("name", new BasicSqlType(new RelDataTypeSystemImpl() {}, SqlTypeName.CHAR));
-                builder.add("age", new BasicSqlType(new RelDataTypeSystemImpl() {}, SqlTypeName.INTEGER));
+                builder.add("ID", new BasicSqlType(new RelDataTypeSystemImpl() {}, SqlTypeName.INTEGER));
+                builder.add("NAME", new BasicSqlType(new RelDataTypeSystemImpl() {}, SqlTypeName.CHAR));
+                builder.add("AGE", new BasicSqlType(new RelDataTypeSystemImpl() {}, SqlTypeName.INTEGER));
                 return builder.build();
             }
         });
@@ -64,8 +64,8 @@ public class CalciteUtils {
             public RelDataType getRowType(final RelDataTypeFactory typeFactory) {
                 RelDataTypeFactory.Builder builder = typeFactory.builder();
 
-                builder.add("id", new BasicSqlType(new RelDataTypeSystemImpl() {}, SqlTypeName.INTEGER));
-                builder.add("name", new BasicSqlType(new RelDataTypeSystemImpl() {}, SqlTypeName.CHAR));
+                builder.add("ID", new BasicSqlType(new RelDataTypeSystemImpl() {}, SqlTypeName.INTEGER));
+                builder.add("NAME", new BasicSqlType(new RelDataTypeSystemImpl() {}, SqlTypeName.CHAR));
                 builder.add("company", new BasicSqlType(new RelDataTypeSystemImpl() {}, SqlTypeName.CHAR));
                 return builder.build();
             }

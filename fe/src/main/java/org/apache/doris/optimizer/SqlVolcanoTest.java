@@ -56,10 +56,11 @@ public class SqlVolcanoTest {
     private static final Logger LOGGER = LoggerFactory.getLogger(SqlVolcanoTest.class);
 
     public static void main(String[] args) {
-        String sql = "select * from USERS";
-
+        //String sql = "select * from USERS a join JOBS b  on a.id = b.id and a.id > 10";
+        //String sql = "select id from USERS where USERS.id >  (select id from JOBS)";
+        String sql = "select  * from USERS union select * from USERS";
         CalcitePlanner planner  = new CalcitePlanner();
-        planner.plan(sql);
-
+        RelNode root = planner.plan(sql);
+        System.out.println("");
     }
 }

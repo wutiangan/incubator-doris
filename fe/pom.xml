@@ -549,7 +549,7 @@ under the License.
         <dependency>
             <groupId>org.apache.calcite</groupId>
             <artifactId>calcite-core</artifactId>
-            <version>1.18.0</version>
+            <version>1.21.0</version>
         </dependency>
 
     </dependencies>
