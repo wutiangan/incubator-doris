@@ -60,18 +60,12 @@ import java.util.Properties;
 public class CalcitePlanner {
     private static final Logger LOGGER = LoggerFactory.getLogger(SqlVolcanoTest.class);
 
-    public RelNode plan(String sql) {
-        SchemaPlus rootSchema = CalciteUtils.registerRootSchema();
-
+    public RelNode plan(String sql, SchemaPlus rootSchema) {
         final FrameworkConfig fromworkConfig = Frameworks.newConfigBuilder()
                 .parserConfig(SqlParser.Config.DEFAULT)
                 .defaultSchema(rootSchema)
                 .traitDefs(ConventionTraitDef.INSTANCE, RelDistributionTraitDef.INSTANCE)
                 .build();
-
-        //String sql
-        //    = "select u.id as user_id, u.name as user_name, j.company as user_company, u.age as user_age from users u"
-        //    + " join jobs j on u.id=j.id where u.age > 30 and j.id>10 order by user_id";
 
         // use HepPlanner
         VolcanoPlanner planner = new VolcanoPlanner();

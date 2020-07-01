@@ -18,6 +18,7 @@
 package org.apache.doris.planner;
 
 import org.apache.calcite.rel.RelNode;
+import org.apache.calcite.schema.SchemaPlus;
 import org.apache.doris.analysis.*;
 import org.apache.doris.catalog.AggregateFunction;
 import org.apache.doris.catalog.AggregateType;
@@ -37,6 +38,7 @@ import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 
 import org.apache.doris.optimizer.CalcitePlanner;
+import org.apache.doris.optimizer.CalciteUtils;
 import org.apache.doris.optimizer.PlanNodeConverter;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -134,7 +136,8 @@ public class SingleNodePlanner {
             LOG.trace("desctbl: " + analyzer.getDescTbl().debugString());
         }
         CalcitePlanner calciteplanner  = new CalcitePlanner();
-        RelNode root = calciteplanner.plan(originStmt);
+        SchemaPlus rootSchema = CalciteUtils.registerRootSchema(analyzer.getDefaultDb());
+        RelNode root = calciteplanner.plan(originStmt, rootSchema);
         PlanNodeConverter convert = new PlanNodeConverter(root, analyzer, this);
 
         List<Expr> resultExprs = Lists.newArrayList();
