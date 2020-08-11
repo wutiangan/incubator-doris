@@ -58,6 +58,7 @@ import org.apache.doris.catalog.OlapTable;
 import org.apache.doris.catalog.Table;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.FeConstants;
+import org.apache.doris.common.Pair;
 import org.apache.doris.common.Reference;
 import org.apache.doris.common.UserException;
 
@@ -66,13 +67,18 @@ import com.google.common.base.Predicate;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
+import com.google.common.collect.Sets;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -90,6 +96,10 @@ public class SingleNodePlanner {
 
     public SingleNodePlanner(PlannerContext ctx) {
         ctx_ = ctx;
+    }
+
+    public PlannerContext getPlannerContext() {
+        return ctx_;
     }
 
     public ArrayList<ScanNode> getScanNodes() {
@@ -653,6 +663,221 @@ public class SingleNodePlanner {
     }
 
     /**
+     * Return the cheapest plan that materializes the joins of all TableRefs in
+     * parentRefPlans and the subplans of all applicable TableRefs in subplanRefs.
+     * Assumes that parentRefPlans are in the order as they originally appeared in
+     * the query.
+     * For this plan:
+     * - the plan is executable, ie, all non-cross joins have equi-join predicates
+     * - the leftmost scan is over the largest of the inputs for which we can still
+     *   construct an executable plan
+     * - from bottom to top, all rhs's are in increasing order of selectivity (percentage
+     *   of surviving rows)
+     * - outer/cross/semi joins: rhs serialized size is < lhs serialized size;
+     *   enforced via join inversion, if necessary
+     * - SubplanNodes are placed as low as possible in the plan tree - as soon as the
+     *   required tuple ids of one or more TableRefs in subplanRefs are materialized
+     * Returns null if we can't create an executable plan.
+     */
+    private PlanNode createCheapestJoinPlan(Analyzer analyzer, List<Pair<TableRef, PlanNode>> parentRefPlans) throws UserException {
+        LOG.info("createCheapestJoinPlan");
+        if (parentRefPlans.size() == 1) {
+            return parentRefPlans.get(0).second;
+        }
+
+        // collect eligible candidates for the leftmost input; list contains
+        // (plan, materialized size)
+        List<Pair<TableRef, Long>> candidates = new ArrayList<>();
+        for (Pair<TableRef, PlanNode> entry: parentRefPlans) {
+            TableRef ref = entry.first;
+            JoinOperator joinOp = ref.getJoinOp();
+
+            // Avoid reordering outer/semi joins which is generally incorrect.
+            // TODO: Allow the rhs of any cross join as the leftmost table. This needs careful
+            // consideration of the joinOps that result from such a re-ordering (IMPALA-1281).
+            if (joinOp.isOuterJoin() || joinOp.isSemiJoin() || joinOp.isCrossJoin()) {
+                continue;
+            }
+
+            PlanNode plan = entry.second;
+            if (plan.getCardinality() == -1) {
+                // use 0 for the size to avoid it becoming the leftmost input
+                // TODO: Consider raw size of scanned partitions in the absence of stats.
+                candidates.add(new Pair<TableRef, Long>(ref, new Long(0)));
+                LOG.info("candidate " + ref.getUniqueAlias() + ": 0");
+                continue;
+            }
+            Preconditions.checkState(ref.isAnalyzed());
+            long materializedSize = plan.getCardinality();
+            // long materializedSize =
+            //        (long) Math.ceil(plan.getAvgRowSize() * (double) plan.getCardinality());
+            candidates.add(new Pair<TableRef, Long>(ref, new Long(materializedSize)));
+            LOG.info("candidate " + ref.getUniqueAlias() + ": " + Long.toString(materializedSize));
+        }
+        if (candidates.isEmpty()) return null;
+
+        // order candidates by descending materialized size; we want to minimize the memory
+        // consumption of the materialized hash tables required for the join sequence
+        Collections.sort(candidates,
+                new Comparator<Pair<TableRef, Long>>() {
+                    @Override
+                    public int compare(Pair<TableRef, Long> a, Pair<TableRef, Long> b) {
+                        long diff = b.second - a.second;
+                        return (diff < 0 ? -1 : (diff > 0 ? 1 : 0));
+                    }
+                });
+
+        for (Pair<TableRef, Long> candidate: candidates) {
+            PlanNode result = createJoinPlan(analyzer, candidate.first, parentRefPlans);
+            if (result != null) return result;
+        }
+        return null;
+    }
+
+    boolean candidateCardinalityIsSmaller(PlanNode candidate, long candidateInnerNodeCardinality,
+            PlanNode newRoot, long newRootInnerNodeCardinality) {
+        if (candidate.getCardinality() < newRoot.getCardinality()) {
+            return true;
+        } else if (candidate.getCardinality() == newRoot.getCardinality()) {
+            if (((candidate instanceof HashJoinNode) && ((HashJoinNode) candidate).getJoinOp().isInnerJoin())
+                && ((newRoot instanceof HashJoinNode) && ((HashJoinNode) newRoot).getJoinOp().isInnerJoin())) {
+                if (candidateInnerNodeCardinality < newRootInnerNodeCardinality) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+    /**
+     * Returns a plan with leftmostRef's plan as its leftmost input; the joins
+     * are in decreasing order of selectiveness (percentage of rows they eliminate).
+     * Creates and adds subplan nodes as soon as the tuple ids required by at least one
+     * subplan ref are materialized by a join node added during plan generation.
+     */
+    private PlanNode createJoinPlan(Analyzer analyzer,
+            TableRef leftmostRef, List<Pair<TableRef, PlanNode>> refPlans)
+            throws UserException {
+        LOG.info("createJoinPlan: " + leftmostRef.getUniqueAlias());
+
+        // the refs that have yet to be joined
+        List<Pair<TableRef, PlanNode>> remainingRefs = new ArrayList<>();
+        PlanNode root = null;  // root of accumulated join plan
+        for (Pair<TableRef, PlanNode> entry: refPlans) {
+            if (entry.first == leftmostRef) {
+                root = entry.second;
+            } else {
+                remainingRefs.add(entry);
+            }
+        }
+        Preconditions.checkNotNull(root);
+
+        // Maps from a TableRef in refPlans with an outer/semi join op to the set of
+        // TableRefs that precede it refPlans (i.e., in FROM-clause order).
+        // The map is used to place outer/semi joins at a fixed position in the plan tree
+        // (IMPALA-860), s.t. all the tables appearing to the left/right of an outer/semi
+        // join in the original query still remain to the left/right after join ordering.
+        // This prevents join re-ordering across outer/semi joins which is generally wrong.
+        Map<TableRef, Set<TableRef>> precedingRefs = new HashMap<>();
+        List<TableRef> tmpTblRefs = new ArrayList<>();
+        for (Pair<TableRef, PlanNode> entry: refPlans) {
+            TableRef tblRef = entry.first;
+            if (tblRef.getJoinOp().isOuterJoin() || tblRef.getJoinOp().isSemiJoin()) {
+                precedingRefs.put(tblRef, Sets.newHashSet(tmpTblRefs));
+            }
+            tmpTblRefs.add(tblRef);
+        }
+
+        // Refs that have been joined. The union of joinedRefs and the refs in remainingRefs
+        // are the set of all table refs.
+        Set<TableRef> joinedRefs = Sets.newHashSet(leftmostRef);
+        long numOps = 0;
+        int i = 0;
+        while (!remainingRefs.isEmpty()) {
+            // We minimize the resulting cardinality at each step in the join chain,
+            // which minimizes the total number of hash table lookups.
+            PlanNode newRoot = null;
+            Pair<TableRef, PlanNode> minEntry = null;
+            long newRootRightChildCardinality = 0;
+            for (Pair<TableRef, PlanNode> entry: remainingRefs) {
+                TableRef ref = entry.first;
+                JoinOperator joinOp = ref.getJoinOp();
+
+                // Place outer/semi joins at a fixed position in the plan tree.
+                Set<TableRef> requiredRefs = precedingRefs.get(ref);
+                if (requiredRefs != null) {
+                    Preconditions.checkState(joinOp.isOuterJoin()
+                            || joinOp.isSemiJoin());
+                    // If the required table refs have not been placed yet, do not even consider
+                    // the remaining table refs to prevent incorrect re-ordering of tables across
+                    // outer/semi joins.
+                    if (!requiredRefs.equals(joinedRefs)) {
+                        break;
+                    }
+                }
+                if (root.getAssignedConjuncts() != null) {
+                    analyzer.setAssignedConjuncts(root.getAssignedConjuncts());
+                }
+                PlanNode candidate = createJoinNode(analyzer, root, entry.second, ref);
+                if (candidate == null) {
+                    continue;
+                }
+                // Have the build side of a join copy data to a compact representation
+                // in the tuple buffer.
+                candidate.getChildren().get(1).setCompactData(true);
+
+                LOG.info("cardinality=" + Long.toString(candidate.getCardinality()));
+
+                // Use 'candidate' as the new root; don't consider any other table refs at this
+                // position in the plan.
+                if (joinOp.isOuterJoin() || joinOp.isSemiJoin()) {
+                    newRoot = candidate;
+                    minEntry = entry;
+                    break;
+                }
+
+                // Always prefer Hash Join over Nested-Loop Join due to limited costing
+                // infrastructure.
+                if (newRoot == null
+                        || (candidate.getClass().equals(newRoot.getClass())
+                        && candidateCardinalityIsSmaller(candidate, entry.second.getCardinality(), newRoot, newRootRightChildCardinality))
+                        || (candidate instanceof HashJoinNode
+                        && newRoot instanceof CrossJoinNode)) {
+                    newRoot = candidate;
+                    minEntry = entry;
+                    newRootRightChildCardinality = entry.second.getCardinality();
+                }
+            }
+
+            if (newRoot == null) {
+                // Could not generate a valid plan.
+                // for example: the biggest table is the last table
+                return null;
+            }
+
+            // we need to insert every rhs row into the hash table and then look up
+            // every lhs row
+            long lhsCardinality = root.getCardinality();
+            long rhsCardinality = minEntry.second.getCardinality();
+            numOps += lhsCardinality + rhsCardinality;
+            if (LOG.isTraceEnabled()) {
+                LOG.trace(Integer.toString(i) + " chose " + minEntry.first.getUniqueAlias()
+                        + " #lhs=" + Long.toString(lhsCardinality)
+                        + " #rhs=" + Long.toString(rhsCardinality)
+                        + " #ops=" + Long.toString(numOps));
+            }
+            remainingRefs.remove(minEntry);
+            joinedRefs.add(minEntry.first);
+            root = newRoot;
+            if (root.getAssignedConjuncts() != null) {
+                analyzer.setAssignedConjuncts(root.getAssignedConjuncts());
+            }
+            ++i;
+        }
+
+        return root;
+    }
+
+    /**
      * Create tree of PlanNodes that implements the Select/Project/Join/Group by/Having
      * of the selectStmt query block.
      */
@@ -691,35 +916,67 @@ public class SingleNodePlanner {
             return createAggregationPlan(selectStmt, analyzer, emptySetNode);
         }
 
-        // create left-deep sequence of binary hash joins; assign node ids as we go along
-        TableRef tblRef = selectStmt.getTableRefs().get(0);
-        materializeTableResultForCrossJoinOrCountStar(tblRef, analyzer);
-        PlanNode root = createTableRefNode(analyzer, tblRef, selectStmt);
-        // to change the inner contains analytic function
-        // selectStmt.seondSubstituteInlineViewExprs(analyzer.getChangeResSmap());
-
-        // add aggregate node here
+        PlanNode root = null;
         AggregateInfo aggInfo = selectStmt.getAggInfo();
 
-        turnOffPreAgg(aggInfo, selectStmt, analyzer, root);
+        if (analyzer.getContext().getSessionVariable().getEnableJoinReorderBasedCost()) {
+            // create plans for our table refs; use a list here instead of a map to
+            // maintain a deterministic order of traversing the TableRefs during join
+            // plan generation (helps with tests)
+            List<Pair<TableRef, PlanNode>> refPlans = Lists.newArrayList();
+            for (TableRef ref: selectStmt.getTableRefs()) {
+                materializeTableResultForCrossJoinOrCountStar(ref, analyzer);
+                PlanNode plan = createTableRefNode(analyzer, ref, selectStmt);
+                aggInfo = selectStmt.getAggInfo();
 
-        if (root instanceof OlapScanNode) {
-            OlapScanNode olapNode = (OlapScanNode) root;
-            // this olap scan node has been turn off pre-aggregation, should not be turned on again.
-            // e.g. select sum(v1) from (select v1 from test_table);
-            if (!olapNode.isPreAggregation()) {
-                olapNode.setCanTurnOnPreAggr(false);
+                turnOffPreAgg(aggInfo, selectStmt, analyzer, root);
+
+                if (root instanceof OlapScanNode) {
+                    OlapScanNode olapNode = (OlapScanNode) root;
+                    // this olap scan node has been turn off pre-aggregation, should not be turned on again.
+                    // e.g. select sum(v1) from (select v1 from test_table);
+                    if (!olapNode.isPreAggregation()) {
+                        olapNode.setCanTurnOnPreAggr(false);
+                    }
+                }
+
+                Preconditions.checkState(plan != null);
+                refPlans.add(new Pair(ref, plan));
             }
-        }
+            // save state of conjunct assignment; needed for join plan generation
+            for (Pair<TableRef, PlanNode> entry: refPlans) {
+                entry.second.setAssignedConjuncts(analyzer.getAssignedConjuncts());
+            }
+            root = createCheapestJoinPlan(analyzer, refPlans);
+            Preconditions.checkState(root != null);
+        } else {
+            // create left-deep sequence of binary hash joins; assign node ids as we go along
+            TableRef tblRef = selectStmt.getTableRefs().get(0);
+            materializeTableResultForCrossJoinOrCountStar(tblRef, analyzer);
+            root = createTableRefNode(analyzer, tblRef, selectStmt);
+            // to change the inner contains analytic function
+            // selectStmt.seondSubstituteInlineViewExprs(analyzer.getChangeResSmap());
 
-        for (int i = 1; i < selectStmt.getTableRefs().size(); ++i) {
-            TableRef outerRef = selectStmt.getTableRefs().get(i - 1);
-            TableRef innerRef = selectStmt.getTableRefs().get(i);
-            root = createJoinNode(analyzer, root, outerRef, innerRef, selectStmt);
-            // Have the build side of a join copy data to a compact representation
-            // in the tuple buffer.
-            root.getChildren().get(1).setCompactData(true);
-            root.assignConjuncts(analyzer);
+            turnOffPreAgg(aggInfo, selectStmt, analyzer, root);
+
+            if (root instanceof OlapScanNode) {
+                OlapScanNode olapNode = (OlapScanNode) root;
+                // this olap scan node has been turn off pre-aggregation, should not be turned on again.
+                // e.g. select sum(v1) from (select v1 from test_table);
+                if (!olapNode.isPreAggregation()) {
+                    olapNode.setCanTurnOnPreAggr(false);
+                }
+            }
+
+            for (int i = 1; i < selectStmt.getTableRefs().size(); ++i) {
+                TableRef outerRef = selectStmt.getTableRefs().get(i - 1);
+                TableRef innerRef = selectStmt.getTableRefs().get(i);
+                root = createJoinNode(analyzer, root, innerRef, selectStmt);
+                // Have the build side of a join copy data to a compact representation
+                // in the tuple buffer.
+                root.getChildren().get(1).setCompactData(true);
+                root.assignConjuncts(analyzer);
+            }
         }
 
         if (selectStmt.getSortInfo() != null && selectStmt.getLimit() == -1
@@ -1449,15 +1706,17 @@ public class SingleNodePlanner {
             scanNode.setSortColumn(tblRef.getSortColumn());
             scanNode.addConjuncts(pushDownConjuncts);
         }
+
+        scanNodes.add(scanNode);
+        List<ScanNode> scanNodeList = selectStmtToScanNodes.computeIfAbsent(selectStmt.getId(), k -> Lists.newArrayList());
+        scanNodeList.add(scanNode);
+
+        // now we put the selectStmtToScanNodes's init before the scanNode.init
         // assignConjuncts(scanNode, analyzer);
         scanNode.init(analyzer);
         // TODO chenhao add
         // materialize conjuncts in where
         analyzer.materializeSlots(scanNode.getConjuncts());
-
-        scanNodes.add(scanNode);
-        List<ScanNode> scanNodeList = selectStmtToScanNodes.computeIfAbsent(selectStmt.getId(), k -> Lists.newArrayList());
-        scanNodeList.add(scanNode);
         return scanNode;
     }
 
@@ -1547,18 +1806,9 @@ public class SingleNodePlanner {
         }
     }
 
-    /**
-     * Creates a new node to join outer with inner. Collects and assigns join conjunct
-     * as well as regular conjuncts. Calls init() on the new join node.
-     * Throws if the JoinNode.init() fails.
-     */
-    private PlanNode createJoinNode(Analyzer analyzer, PlanNode outer, TableRef outerRef, TableRef innerRef,
-                                    SelectStmt selectStmt)
-            throws UserException, AnalysisException {
+    private PlanNode createJoinNodeBase(Analyzer analyzer, PlanNode outer, PlanNode inner, TableRef innerRef)
+            throws UserException {
         materializeTableResultForCrossJoinOrCountStar(innerRef, analyzer);
-        // the rows coming from the build node only need to have space for the tuple
-        // materialized by that node
-        PlanNode inner = createTableRefNode(analyzer, innerRef, selectStmt);
 
         List<Expr> eqJoinConjuncts = Lists.newArrayList();
         Reference<String> errMsg = new Reference<String>();
@@ -1575,8 +1825,8 @@ public class SingleNodePlanner {
             }
 
             // construct cross join node
-            LOG.debug("Join between {} and {} requires at least one conjunctive equality predicate between the two tables",
-                    outerRef.getAliasAsName(), innerRef.getAliasAsName());
+            // LOG.debug("Join between {} and {} requires at least one conjunctive equality predicate between the two tables",
+            //        outerRef.getAliasAsName(), innerRef.getAliasAsName());
             // TODO If there are eq join predicates then we should construct a hash join
             CrossJoinNode result =
                     new CrossJoinNode(ctx_.getNextNodeId(), outer, inner, innerRef);
@@ -1602,6 +1852,28 @@ public class SingleNodePlanner {
                         ojConjuncts);
         result.init(analyzer);
         return result;
+    }
+
+    /*
+    for joinreorder
+    */
+    private PlanNode createJoinNode(Analyzer analyzer, PlanNode outer, PlanNode inner, TableRef innerRef)
+            throws UserException {
+        return createJoinNodeBase(analyzer, outer, inner, innerRef);
+    }
+
+    /**
+     * Creates a new node to join outer with inner. Collects and assigns join conjunct
+     * as well as regular conjuncts. Calls init() on the new join node.
+     * Throws if the JoinNode.init() fails.
+     */
+    private PlanNode createJoinNode(Analyzer analyzer, PlanNode outer, TableRef innerRef,
+                                    SelectStmt selectStmt) throws UserException {
+        // the rows coming from the build node only need to have space for the tuple
+        // materialized by that node
+        PlanNode inner = createTableRefNode(analyzer, innerRef, selectStmt);
+
+        return createJoinNodeBase(analyzer, outer, inner, innerRef);
     }
 
     /**

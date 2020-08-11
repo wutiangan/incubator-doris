@@ -50,6 +50,7 @@ import org.apache.doris.common.ErrorReport;
 import org.apache.doris.common.UserException;
 import org.apache.doris.qe.ConnectContext;
 import org.apache.doris.qe.SessionVariable;
+import org.apache.doris.rewrite.mvrewrite.MVSelectFailedException;
 import org.apache.doris.service.FrontendOptions;
 import org.apache.doris.system.Backend;
 import org.apache.doris.thrift.TExplainLevel;
@@ -279,6 +280,18 @@ public class OlapScanNode extends ScanNode {
     public void init(Analyzer analyzer) throws UserException {
         super.init(analyzer);
         computePartitionInfo();
+        if (analyzer.getContext().getSessionVariable().getEnableJoinReorderBasedCost()) {
+            computeMemLayout(analyzer);
+            SingleNodePlanner singleNodePlanner = analyzer.getSingleNodePlanner();
+            // materialized view selector
+            boolean selectFailed = singleNodePlanner.selectMaterializedView(
+                    singleNodePlanner.getPlannerContext().getQueryStmt(),
+                    analyzer);
+            if (selectFailed) {
+                throw new MVSelectFailedException("Failed to select materialize view");
+            }
+            finalize(analyzer);
+        }
     }
 
     @Override
@@ -301,7 +314,10 @@ public class OlapScanNode extends ScanNode {
     @Override
     public void computeStats(Analyzer analyzer) {
         if (cardinality > 0) {
-            avgRowSize = totalBytes / (float) cardinality;
+            // avgRowSize = totalBytes / (float) cardinality;
+            // the totalByte is not accurate, so we use the TupleDescriptor to calc avgRowSize
+            super.computeStats(analyzer);
+
             if (hasLimit()) {
                 cardinality = Math.min(cardinality, limit);
             }
@@ -437,6 +453,12 @@ public class OlapScanNode extends ScanNode {
 
             result.add(scanRangeLocations);
         }
+        // FIXME(dhc): we use cardinality here to simulate ndv
+        if (tablets.size() == 0) {
+            desc.setCardinality(0);
+        } else {
+            desc.setCardinality(cardinality);
+        }
     }
 
     private void computePartitionInfo() throws AnalysisException {
@@ -487,6 +509,7 @@ public class OlapScanNode extends ScanNode {
 
     private void getScanRangeLocations() throws UserException {
         if (selectedPartitionIds.size() == 0) {
+            desc.setCardinality(0);
             return;
         }
         Preconditions.checkState(selectedIndexId != -1);

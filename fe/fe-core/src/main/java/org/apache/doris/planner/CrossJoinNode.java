@@ -91,6 +91,8 @@ public class CrossJoinNode extends PlanNode {
         } else {
             output.append(detailPrefix + "predicates is NULL.");
         }
+        output.append(detailPrefix).append(String.format(
+                "cardinality=%s", cardinality));
         return output.toString();
     }
 

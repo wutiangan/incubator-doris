@@ -62,18 +62,22 @@ public class TupleDescriptor {
     private int numNullBytes;
     private int numNullableSlots;
 
+    private long cardinality;
+
     private float avgSerializedSize;  // in bytes; includes serialization overhead
 
     public TupleDescriptor(TupleId id) {
         this.id = id;
         this.slots = new ArrayList<SlotDescriptor>();
         this.debugName = "";
+        this.cardinality = -1;
     }
 
     public TupleDescriptor(TupleId id, String debugName) {
         this.id = id;
         this.slots = new ArrayList<SlotDescriptor>();
         this.debugName = debugName;
+        this.cardinality = -1;
     }
 
     public void addSlot(SlotDescriptor desc) {
@@ -95,6 +99,14 @@ public class TupleDescriptor {
 
     public ArrayList<SlotDescriptor> getSlots() {
         return slots;
+    }
+
+    public void setCardinality(long cardinality) {
+        this.cardinality = cardinality;
+    }
+
+    public long getCardinality() {
+        return cardinality;
     }
 
     public ArrayList<SlotDescriptor> getMaterializedSlots() {

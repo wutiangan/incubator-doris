@@ -273,6 +273,8 @@ public class AggregationNode extends PlanNode {
         if (!conjuncts.isEmpty()) {
             output.append(detailPrefix + "having: ").append(getExplainString(conjuncts) + "\n");
         }
+        output.append(detailPrefix).append(String.format(
+                "cardinality=%s", cardinality));
         return output.toString();
     }
 

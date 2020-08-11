@@ -147,6 +147,9 @@ public class Planner {
 
         plannerContext = new PlannerContext(analyzer, queryStmt, queryOptions, statement);
         singleNodePlanner = new SingleNodePlanner(plannerContext);
+        if (analyzer.getContext().getSessionVariable().getEnableJoinReorderBasedCost()) {
+            analyzer.setSingleNodePlanner(singleNodePlanner);
+        }
         PlanNode singleNodePlan = singleNodePlanner.createSingleNodePlan();
 
         if (statement instanceof InsertStmt) {
@@ -160,15 +163,17 @@ public class Planner {
 
         setResultExprScale(analyzer, queryStmt.getResultExprs());
 
-        // materialized view selector
-        boolean selectFailed = singleNodePlanner.selectMaterializedView(queryStmt, analyzer);
-        if (selectFailed) {
-            throw new MVSelectFailedException("Failed to select materialize view");
+        if (!analyzer.getContext().getSessionVariable().getEnableJoinReorderBasedCost()) {
+            // materialized view selector
+            boolean selectFailed = singleNodePlanner.selectMaterializedView(queryStmt, analyzer);
+            if (selectFailed) {
+                throw new MVSelectFailedException("Failed to select materialize view");
+            }
+            // compute mem layout *before* finalize(); finalize() may reference
+            // TupleDescriptor.avgSerializedSize
+            analyzer.getDescTbl().computeMemLayout();
+            singleNodePlan.finalize(analyzer);
         }
-        // compute mem layout *before* finalize(); finalize() may reference
-        // TupleDescriptor.avgSerializedSize
-        analyzer.getDescTbl().computeMemLayout();
-        singleNodePlan.finalize(analyzer);
         if (queryOptions.num_nodes == 1) {
             // single-node execution; we're almost done
             singleNodePlan = addUnassignedConjuncts(analyzer, singleNodePlan);

@@ -34,6 +34,7 @@ import org.apache.doris.common.ErrorReport;
 import org.apache.doris.common.IdGenerator;
 import org.apache.doris.common.util.TimeUtils;
 import org.apache.doris.planner.PlanNode;
+import org.apache.doris.planner.SingleNodePlanner;
 import org.apache.doris.qe.ConnectContext;
 import org.apache.doris.rewrite.BetweenToCompoundRule;
 import org.apache.doris.rewrite.ExprRewriteRule;
@@ -160,6 +161,13 @@ public class Analyzer {
     public void setTimezone(String timezone) { this.timezone = timezone; }
     public String getTimezone() { return timezone; }
 
+    public void setSingleNodePlanner(SingleNodePlanner singleNodePlanner) {
+        globalState.singleNodePlanner = singleNodePlanner;
+    }
+    public SingleNodePlanner getSingleNodePlanner() {
+        return globalState.singleNodePlanner;
+    }
+
     // state shared between all objects of an Analyzer tree
     // TODO: Many maps here contain properties about tuples, e.g., whether
     // a tuple is outer/semi joined, etc. Remove the maps in favor of making
@@ -169,6 +177,8 @@ public class Analyzer {
         private final Catalog catalog;
         private final IdGenerator<ExprId> conjunctIdGenerator = ExprId.createGenerator();
         private final ConnectContext context;
+        // For join reorder
+        private SingleNodePlanner singleNodePlanner;
 
         // True if we are analyzing an explain request. Should be set before starting
         // analysis.
@@ -195,7 +205,7 @@ public class Analyzer {
         private final Map<TupleId, List<ExprId>> eqJoinConjuncts = Maps.newHashMap();
 
         // set of conjuncts that have been assigned to some PlanNode
-        private final Set<ExprId> assignedConjuncts =
+        private Set<ExprId> assignedConjuncts =
             Collections.newSetFromMap(new IdentityHashMap<ExprId, Boolean>());
 
         // map from outer-joined tuple id, ie, one that is nullable in this select block,
@@ -924,6 +934,14 @@ public class Analyzer {
             LOG.debug("register equiv predicate: " + p.toSql() + " " + p.debugString());
         }
         registerConjunct(p);
+    }
+
+    public Set<ExprId> getAssignedConjuncts() {
+        return Sets.newHashSet(globalState.assignedConjuncts);
+    }
+
+    public void setAssignedConjuncts(Set<ExprId> assigned) {
+        globalState.assignedConjuncts = Sets.newHashSet(assigned);
     }
 
     /**

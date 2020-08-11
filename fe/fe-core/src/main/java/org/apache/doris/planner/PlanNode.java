@@ -19,6 +19,7 @@ package org.apache.doris.planner;
 
 import org.apache.doris.analysis.Analyzer;
 import org.apache.doris.analysis.Expr;
+import org.apache.doris.analysis.ExprId;
 import org.apache.doris.analysis.ExprSubstitutionMap;
 import org.apache.doris.analysis.SlotId;
 import org.apache.doris.analysis.TupleDescriptor;
@@ -39,6 +40,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Set;
 
@@ -62,9 +64,9 @@ abstract public class PlanNode extends TreeNode<PlanNode> {
 
     protected String planNodeName;
 
-    protected PlanNodeId     id;  // unique w/in plan tree; assigned by planner
+    protected PlanNodeId id;  // unique w/in plan tree; assigned by planner
     protected PlanFragmentId fragmentId;  // assigned by planner after fragmentation step
-    protected long           limit; // max. # of rows to be returned; 0: no limit
+    protected long limit; // max. # of rows to be returned; 0: no limit
 
     // ids materialized by the tree rooted at this node
     protected ArrayList<TupleId> tupleIds;
@@ -99,6 +101,8 @@ abstract public class PlanNode extends TreeNode<PlanNode> {
     //  Node should compact data.
     protected boolean compactData;
     protected int numInstances;
+
+    private boolean cardinalityIsDone = false;
 
     protected PlanNode(PlanNodeId id, ArrayList<TupleId> tupleIds, String planNodeName) {
         this.id = id;
@@ -175,8 +179,14 @@ abstract public class PlanNode extends TreeNode<PlanNode> {
         fragmentId = id;
     }
 
-    public void setFragment(PlanFragment fragment) { fragment_ = fragment; }
-    public PlanFragment getFragment() { return fragment_; }
+    public void setFragment(PlanFragment fragment) {
+        fragment_ = fragment;
+    }
+
+    public PlanFragment getFragment() {
+        return fragment_;
+    }
+
     public long getLimit() {
         return limit;
     }
@@ -252,6 +262,14 @@ abstract public class PlanNode extends TreeNode<PlanNode> {
         this.conjuncts.addAll(conjuncts);
     }
 
+    public void setAssignedConjuncts(Set<ExprId> conjuncts) {
+        assignedConjuncts = conjuncts;
+    }
+
+    public Set<ExprId> getAssignedConjuncts() {
+        return assignedConjuncts;
+    }
+
     public void transferConjuncts(PlanNode recipient) {
         recipient.conjuncts.addAll(conjuncts);
         conjuncts.clear();
@@ -261,7 +279,7 @@ abstract public class PlanNode extends TreeNode<PlanNode> {
      * Call computeMemLayout() for all materialized tuples.
      */
     protected void computeMemLayout(Analyzer analyzer) {
-        for (TupleId id: tupleIds) {
+        for (TupleId id : tupleIds) {
             analyzer.getDescTbl().getTupleDesc(id).computeMemLayout();
         }
     }
@@ -339,8 +357,8 @@ abstract public class PlanNode extends TreeNode<PlanNode> {
             String childDetailPrefix = prefix + "|    ";
             for (int i = 1; i < children.size(); ++i) {
                 expBuilder.append(
-                  children.get(i).getExplainString(childHeadlinePrefix, childDetailPrefix,
-                    detailLevel));
+                        children.get(i).getExplainString(childHeadlinePrefix, childDetailPrefix,
+                                detailLevel));
                 expBuilder.append(childDetailPrefix + "\n");
             }
             expBuilder.append(children.get(0).getExplainString(prefix, prefix, detailLevel));
@@ -385,7 +403,7 @@ abstract public class PlanNode extends TreeNode<PlanNode> {
             return;
         } else {
             msg.num_children = children.size();
-            for (PlanNode child: children) {
+            for (PlanNode child : children) {
                 child.treeToThriftHelper(container);
             }
         }
@@ -420,25 +438,28 @@ abstract public class PlanNode extends TreeNode<PlanNode> {
         if (!children.isEmpty()) {
             numNodes = getChild(0).numNodes;
         }
-    }
-
-    /**
-     * Compute the product of the selectivies of all conjuncts.
-     */
-    protected double computeSelectivity() {
-        double prod = 1.0;
-        for (Expr e : conjuncts) {
-            prod *= e.getSelectivity();
+        if (analyzer.getContext().getSessionVariable().getEnableJoinReorderBasedCost()) {
+            if (cardinalityIsDone) {
+                cardinality = applyConjunctsSelectivity(cardinality);
+            }
+            cardinalityIsDone = true;
         }
-        return prod;
     }
 
     protected ExprSubstitutionMap outputSmap;
+
+    // global state of planning wrt conjunct assignment; used by planner as a shortcut
+    // to avoid having to pass assigned conjuncts back and forth
+    // (the planner uses this to save and reset the global state in between join tree
+    // alternatives)
+    protected Set<ExprId> assignedConjuncts;
+
     protected ExprSubstitutionMap withoutTupleIsNullOutputSmap;
 
     public ExprSubstitutionMap getOutputSmap() {
         return outputSmap;
     }
+
     public void setOutputSmap(ExprSubstitutionMap smap) {
         outputSmap = smap;
     }
@@ -446,16 +467,18 @@ abstract public class PlanNode extends TreeNode<PlanNode> {
     public void setWithoutTupleIsNullOutputSmap(ExprSubstitutionMap smap) {
         withoutTupleIsNullOutputSmap = smap;
     }
+
     public ExprSubstitutionMap getWithoutTupleIsNullOutputSmap() {
         return withoutTupleIsNullOutputSmap == null ? outputSmap : withoutTupleIsNullOutputSmap;
     }
+
     /**
      * Marks all slots referenced in exprs as materialized.
      */
     protected void markSlotsMaterialized(Analyzer analyzer, List<Expr> exprs) {
         List<SlotId> refdIdList = Lists.newArrayList();
 
-        for (Expr expr: exprs) {
+        for (Expr expr : exprs) {
             expr.getIds(null, refdIdList);
         }
 
@@ -521,12 +544,13 @@ abstract public class PlanNode extends TreeNode<PlanNode> {
     /**
      * Sets outputSmap_ to compose(existing smap, combined child smap). Also
      * substitutes conjuncts_ using the combined child smap.
+     *
      * @throws AnalysisException
      */
     protected void createDefaultSmap(Analyzer analyzer) throws UserException {
         ExprSubstitutionMap combinedChildSmap = getCombinedChildSmap();
         outputSmap =
-            ExprSubstitutionMap.compose(outputSmap, combinedChildSmap, analyzer);
+                ExprSubstitutionMap.compose(outputSmap, combinedChildSmap, analyzer);
 
         conjuncts = Expr.substituteList(conjuncts, outputSmap, analyzer, false);
     }
@@ -599,4 +623,59 @@ abstract public class PlanNode extends TreeNode<PlanNode> {
             sb.append(")");
         }
     }
+
+    /**
+     * Returns the estimated combined selectivity of all conjuncts. Uses heuristics to
+     * address the following estimation challenges:
+     * 1. The individual selectivities of conjuncts may be unknown.
+     * 2. Two selectivities, whether known or unknown, could be correlated. Assuming
+     * independence can lead to significant underestimation.
+     * <p>
+     * The first issue is addressed by using a single default selectivity that is
+     * representative of all conjuncts with unknown selectivities.
+     * The second issue is addressed by an exponential backoff when multiplying each
+     * additional selectivity into the final result.
+     */
+    static protected double computeCombinedSelectivity(List<Expr> conjuncts) {
+        // Collect all estimated selectivities.
+        List<Double> selectivities = new ArrayList<>();
+        for (Expr e : conjuncts) {
+            if (e.hasSelectivity()) selectivities.add(e.getSelectivity());
+        }
+        if (selectivities.size() != conjuncts.size()) {
+            // Some conjuncts have no estimated selectivity. Use a single default
+            // representative selectivity for all those conjuncts.
+            selectivities.add(Expr.DEFAULT_SELECTIVITY);
+        }
+        // Sort the selectivities to get a consistent estimate, regardless of the original
+        // conjunct order. Sort in ascending order such that the most selective conjunct
+        // is fully applied.
+        Collections.sort(selectivities);
+        double result = 1.0;
+        for (int i = 0; i < selectivities.size(); ++i) {
+            // Exponential backoff for each selectivity multiplied into the final result.
+            result *= Math.pow(selectivities.get(i), 1.0 / (double) (i + 1));
+        }
+        // Bound result in [0, 1]
+        return Math.max(0.0, Math.min(1.0, result));
+    }
+
+    protected double computeSelectivity() {
+        return computeCombinedSelectivity(conjuncts);
+    }
+
+    // Compute the cardinality after applying conjuncts based on 'preConjunctCardinality'.
+    protected long applyConjunctsSelectivity(long preConjunctCardinality) {
+        return applySelectivity(preConjunctCardinality, computeSelectivity());
+    }
+
+    // Compute the cardinality after applying conjuncts with 'selectivity', based on
+    // 'preConjunctCardinality'.
+    protected long applySelectivity(long preConjunctCardinality, double selectivity) {
+        long cardinality = (long) Math.round(preConjunctCardinality * selectivity);
+        // don't round cardinality down to zero for safety.
+        if (cardinality == 0 && preConjunctCardinality > 0) return 1;
+        return cardinality;
+    }
 }
+
