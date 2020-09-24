@@ -439,10 +439,10 @@ abstract public class PlanNode extends TreeNode<PlanNode> {
             numNodes = getChild(0).numNodes;
         }
         if (analyzer.getContext().getSessionVariable().getEnableJoinReorderBasedCost()) {
-            if (cardinalityIsDone) {
+            if (!cardinalityIsDone) {
                 cardinality = applyConjunctsSelectivity(cardinality);
+                cardinalityIsDone = true;
             }
-            cardinalityIsDone = true;
         }
     }
 
@@ -661,6 +661,9 @@ abstract public class PlanNode extends TreeNode<PlanNode> {
     }
 
     protected double computeSelectivity() {
+        for (Expr expr: conjuncts) {
+            expr.setSelectivity();
+        }
         return computeCombinedSelectivity(conjuncts);
     }
 
